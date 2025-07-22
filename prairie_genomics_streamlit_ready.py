@@ -452,6 +452,171 @@ class EnhancedGeneFilter:
         gene_vars = expression_data.var(axis=1)
         top_variable_genes = gene_vars.nlargest(top_n).index
         return expression_data.loc[top_variable_genes]
+    
+    @staticmethod
+    def detect_duplicate_genes(expression_data: pd.DataFrame):
+        """Detect and report duplicate gene IDs in expression data"""
+        gene_counts = expression_data.index.value_counts()
+        duplicates = gene_counts[gene_counts > 1]
+        
+        if len(duplicates) == 0:
+            return {
+                'has_duplicates': False,
+                'duplicate_count': 0,
+                'total_genes': len(expression_data),
+                'unique_genes': len(expression_data.index.unique()),
+                'duplicate_genes': {},
+                'examples': []
+            }
+        
+        # Get examples of duplicate genes
+        examples = []
+        for gene_id in duplicates.head(5).index:
+            gene_rows = expression_data.index == gene_id
+            examples.append({
+                'gene_id': gene_id,
+                'count': int(gene_counts[gene_id]),
+                'mean_expression': float(expression_data.loc[gene_rows].mean().mean()),
+                'std_expression': float(expression_data.loc[gene_rows].std().mean())
+            })
+        
+        return {
+            'has_duplicates': True,
+            'duplicate_count': len(duplicates),
+            'total_genes': len(expression_data),
+            'unique_genes': len(expression_data.index.unique()),
+            'duplicate_genes': duplicates.to_dict(),
+            'examples': examples,
+            'affected_rows': int(gene_counts[gene_counts > 1].sum() - len(duplicates))  # Extra rows due to duplication
+        }
+    
+    @staticmethod
+    def aggregate_duplicate_genes(expression_data: pd.DataFrame, method: str = 'mean'):
+        """Aggregate duplicate gene IDs using specified method"""
+        duplicate_info = EnhancedGeneFilter.detect_duplicate_genes(expression_data)
+        
+        if not duplicate_info['has_duplicates']:
+            return expression_data, duplicate_info
+        
+        # Apply aggregation
+        aggregation_methods = {
+            'mean': lambda x: x.mean(),
+            'median': lambda x: x.median(), 
+            'max': lambda x: x.max(),
+            'sum': lambda x: x.sum(),
+            'first': lambda x: x.iloc[0]  # Take first occurrence
+        }
+        
+        if method not in aggregation_methods:
+            method = 'mean'  # Default fallback
+            
+        try:
+            # Group by gene ID and apply aggregation method
+            aggregated_data = expression_data.groupby(expression_data.index).agg(aggregation_methods[method])
+            
+            # Create processing summary
+            processing_summary = {
+                'original_genes': duplicate_info['total_genes'],
+                'unique_genes': duplicate_info['unique_genes'],
+                'duplicates_removed': duplicate_info['affected_rows'],
+                'method_used': method,
+                'success': True
+            }
+            
+            return aggregated_data, processing_summary
+            
+        except Exception as e:
+            # If aggregation fails, return original data with error info
+            processing_summary = {
+                'original_genes': duplicate_info['total_genes'],
+                'unique_genes': duplicate_info['unique_genes'],
+                'duplicates_removed': 0,
+                'method_used': method,
+                'success': False,
+                'error': str(e)
+            }
+            
+            return expression_data, processing_summary
+    
+    @staticmethod
+    def apply_smart_filtering(expression_data: pd.DataFrame, auto_adjust: bool = True):
+        """Apply automatic gene filtering with dataset-appropriate defaults"""
+        n_genes, n_samples = expression_data.shape
+        
+        # Smart parameter adjustment based on dataset size
+        if auto_adjust:
+            # Adjust minimum expression based on data distribution
+            median_expr = expression_data.median().median()
+            q25_expr = expression_data.quantile(0.25).quantile(0.25)
+            
+            # Adaptive thresholds
+            if median_expr > 10:  # High expression data (e.g., TPM, FPKM)
+                min_expression = max(1.0, q25_expr * 0.5)
+            elif median_expr > 1:  # Medium expression data
+                min_expression = max(0.5, q25_expr * 0.3)
+            else:  # Low expression data (e.g., log-transformed)
+                min_expression = max(0.1, q25_expr * 0.2)
+            
+            # Adjust minimum samples based on total sample size
+            min_samples = max(2, min(5, n_samples // 10))
+            
+            # Adjust percentile threshold based on data sparsity
+            sparsity = (expression_data == 0).sum().sum() / (n_genes * n_samples)
+            percentile_threshold = 0.25 if sparsity < 0.5 else 0.1
+            
+        else:
+            # Use fixed defaults
+            min_expression = 1.0
+            min_samples = 3
+            percentile_threshold = 0.25
+        
+        # Apply filtering
+        try:
+            filtered_data = EnhancedGeneFilter.filter_low_expression_genes(
+                expression_data, min_expression, min_samples, percentile_threshold
+            )
+            
+            # If too many genes remain and dataset is large, apply variance filtering
+            if len(filtered_data) > 15000 and n_samples > 20:
+                max_genes = min(10000, len(filtered_data))
+                filtered_data = EnhancedGeneFilter.filter_by_variance(filtered_data, max_genes)
+                variance_applied = True
+            else:
+                variance_applied = False
+            
+            # Create filtering summary
+            filtering_summary = {
+                'original_genes': n_genes,
+                'filtered_genes': len(filtered_data),
+                'genes_removed': n_genes - len(filtered_data),
+                'removal_rate': (n_genes - len(filtered_data)) / n_genes * 100,
+                'parameters': {
+                    'min_expression': min_expression,
+                    'min_samples': min_samples,
+                    'percentile_threshold': percentile_threshold
+                },
+                'variance_filtering_applied': variance_applied,
+                'auto_adjusted': auto_adjust,
+                'success': True
+            }
+            
+            return filtered_data, filtering_summary
+            
+        except Exception as e:
+            # If filtering fails, return original data with error info
+            filtering_summary = {
+                'original_genes': n_genes,
+                'filtered_genes': n_genes,
+                'genes_removed': 0,
+                'removal_rate': 0,
+                'parameters': {},
+                'variance_filtering_applied': False,
+                'auto_adjusted': auto_adjust,
+                'success': False,
+                'error': str(e)
+            }
+            
+            return expression_data, filtering_summary
 
 class BasicPathwayAnalyzer:
     """Enhanced pathway analysis with basic gene sets and immune pathways"""
@@ -688,28 +853,69 @@ class PrairieGenomicsStreamlit:
             """)
     
     def load_example_data(self):
-        """Load example genomic data for demonstration"""
+        """Load example genomic data with realistic issues for demonstration"""
         try:
             # Generate synthetic expression data
             np.random.seed(42)
-            genes = [f"GENE_{i:04d}" for i in range(1000)]
+            base_genes = [f"GENE_{i:04d}" for i in range(950)]
             samples = [f"Sample_{i:02d}" for i in range(50)]
             
+            # Add some duplicate genes to demonstrate duplicate handling
+            duplicate_genes = ["GENE_0001", "GENE_0002", "GENE_0003", "GENE_0010", "GENE_0011"] * 10  # 50 duplicates
+            all_genes = base_genes + duplicate_genes
+            
             # Create expression matrix with some differential patterns
-            expression_data = pd.DataFrame(
-                np.random.lognormal(mean=5, sigma=1, size=(len(genes), len(samples))),
-                index=genes,
+            raw_expression_data = pd.DataFrame(
+                np.random.lognormal(mean=3, sigma=1.2, size=(len(all_genes), len(samples))),
+                index=all_genes,
                 columns=samples
             )
             
+            # Add some very low expression genes to demonstrate filtering
+            low_expr_genes = base_genes[800:900]  # 100 low expression genes
+            for gene in low_expr_genes:
+                raw_expression_data.loc[gene] = np.random.lognormal(mean=0.5, sigma=0.3, size=len(samples))
+            
             # Make some genes differentially expressed
-            diff_genes = genes[:100]
+            diff_genes = base_genes[:100]
             treatment_samples = samples[25:]
             for gene in diff_genes:
                 if np.random.random() > 0.5:
-                    expression_data.loc[gene, treatment_samples] *= np.random.uniform(1.5, 3.0)
+                    raw_expression_data.loc[gene, treatment_samples] *= np.random.uniform(1.5, 3.0)
                 else:
-                    expression_data.loc[gene, treatment_samples] *= np.random.uniform(0.3, 0.7)
+                    raw_expression_data.loc[gene, treatment_samples] *= np.random.uniform(0.3, 0.7)
+            
+            with st.spinner("🔄 Processing example data..."):
+                # Apply the same processing pipeline as file upload
+                
+                # Step 1: Detect duplicates
+                duplicate_info = EnhancedGeneFilter.detect_duplicate_genes(raw_expression_data)
+                
+                if duplicate_info['has_duplicates']:
+                    st.info(f"ℹ️ Example data contains {duplicate_info['duplicate_count']} duplicate gene IDs (for demonstration)")
+                    # Automatically aggregate duplicates using mean
+                    processed_data, agg_summary = EnhancedGeneFilter.aggregate_duplicate_genes(raw_expression_data, 'mean')
+                    if agg_summary['success']:
+                        st.success(f"✅ Aggregated duplicates: {agg_summary['original_genes']} → {agg_summary['unique_genes']} genes")
+                    else:
+                        processed_data = raw_expression_data
+                else:
+                    processed_data = raw_expression_data
+                
+                # Step 2: Apply automatic filtering
+                filtered_data, filter_summary = EnhancedGeneFilter.apply_smart_filtering(processed_data, auto_adjust=True)
+                
+                if filter_summary['success']:
+                    st.success(f"✅ Smart filtering applied: {filter_summary['genes_removed']} low-expression genes removed")
+                    st.info(f"📊 Final dataset: {filter_summary['filtered_genes']} genes (removal rate: {filter_summary['removal_rate']:.1f}%)")
+                    
+                    # Show filtering parameters
+                    with st.expander("🔧 Auto-adjusted Parameters"):
+                        for param, value in filter_summary['parameters'].items():
+                            st.write(f"- **{param}**: {value:.3f}")
+                else:
+                    filtered_data = processed_data
+                    st.warning("⚠️ Filtering failed, using unfiltered data")
             
             # Create clinical data
             clinical_data = pd.DataFrame({
@@ -722,15 +928,22 @@ class PrairieGenomicsStreamlit:
             })
             clinical_data.set_index('Sample_ID', inplace=True)
             
-            # Store in session state
-            st.session_state.expression_data = expression_data
+            # Store processed data in session state
+            st.session_state.expression_data = filtered_data
             st.session_state.clinical_data = clinical_data
             
-            st.success("✅ Example data loaded successfully!")
-            st.info(f"Loaded {len(genes)} genes across {len(samples)} samples")
+            # Summary
+            original_shape = raw_expression_data.shape
+            final_shape = filtered_data.shape
+            st.success("🎉 Example data processing complete!")
+            st.info(f"📈 Processed dataset: {final_shape[0]} genes × {final_shape[1]} samples (reduced from {original_shape[0]} genes)")
+            
+            # Show preview
+            with st.expander("📋 Data Preview"):
+                st.dataframe(filtered_data.head())
             
         except Exception as e:
-            st.error(f"Failed to load example data: {e}")
+            st.error(f"❌ Failed to load example data: {e}")
     
     # ================================
     # TAB SECTIONS
@@ -753,17 +966,98 @@ class PrairieGenomicsStreamlit:
                 
                 if expr_file:
                     try:
+                        # Step 1: Load raw data
                         if expr_file.name.endswith('.xlsx'):
-                            data = pd.read_excel(expr_file, index_col=0)
+                            raw_data = pd.read_excel(expr_file, index_col=0)
                         else:
-                            data = pd.read_csv(expr_file, index_col=0, sep=None, engine='python')
+                            raw_data = pd.read_csv(expr_file, index_col=0, sep=None, engine='python')
                         
-                        st.session_state.expression_data = data
-                        st.success(f"✅ Loaded {data.shape[0]} genes, {data.shape[1]} samples")
-                        st.dataframe(data.head())
+                        with st.spinner("🔍 Processing data: detecting duplicates..."):
+                            # Step 2: Detect duplicate genes
+                            duplicate_info = EnhancedGeneFilter.detect_duplicate_genes(raw_data)
+                            
+                            if duplicate_info['has_duplicates']:
+                                st.warning(f"⚠️ Found {duplicate_info['duplicate_count']} duplicate gene IDs affecting {duplicate_info['affected_rows']} rows")
+                                
+                                # Show aggregation options
+                                col_agg1, col_agg2 = st.columns([1, 2])
+                                with col_agg1:
+                                    aggregation_method = st.selectbox(
+                                        "Aggregation method:",
+                                        ["mean", "median", "max", "sum", "first"],
+                                        index=0,
+                                        help="How to combine duplicate gene IDs"
+                                    )
+                                
+                                with col_agg2:
+                                    if st.button("🔧 Apply Aggregation"):
+                                        # Apply aggregation
+                                        processed_data, agg_summary = EnhancedGeneFilter.aggregate_duplicate_genes(raw_data, aggregation_method)
+                                        
+                                        if agg_summary['success']:
+                                            st.success(f"✅ Aggregated duplicates using {agg_summary['method_used']} method")
+                                            st.info(f"Reduced from {agg_summary['original_genes']} to {agg_summary['unique_genes']} unique genes")
+                                        else:
+                                            st.error(f"❌ Aggregation failed: {agg_summary.get('error', 'Unknown error')}")
+                                            processed_data = raw_data
+                                    else:
+                                        processed_data = raw_data
+                                        st.info("👆 Click 'Apply Aggregation' to process duplicate genes")
+                            else:
+                                processed_data = raw_data
+                                st.success("✅ No duplicate genes detected")
+                        
+                        # Step 3: Apply automatic filtering
+                        with st.spinner("🧹 Applying smart gene filtering..."):
+                            # Show filtering options
+                            col_filt1, col_filt2 = st.columns([1, 1])
+                            with col_filt1:
+                                apply_auto_filter = st.checkbox("Apply automatic filtering", value=True, help="Remove lowly expressed genes")
+                            with col_filt2:
+                                auto_adjust = st.checkbox("Smart parameter adjustment", value=True, help="Adjust filtering parameters based on data")
+                            
+                            if apply_auto_filter:
+                                filtered_data, filter_summary = EnhancedGeneFilter.apply_smart_filtering(processed_data, auto_adjust)
+                                
+                                if filter_summary['success']:
+                                    st.success(f"✅ Filtering complete: {filter_summary['genes_removed']} genes removed ({filter_summary['removal_rate']:.1f}%)")
+                                    
+                                    # Show filtering details in expandable section
+                                    with st.expander("📊 Filtering Details"):
+                                        col1, col2, col3 = st.columns(3)
+                                        col1.metric("Original Genes", filter_summary['original_genes'])
+                                        col2.metric("Filtered Genes", filter_summary['filtered_genes']) 
+                                        col3.metric("Removal Rate", f"{filter_summary['removal_rate']:.1f}%")
+                                        
+                                        st.write("**Parameters used:**")
+                                        for param, value in filter_summary['parameters'].items():
+                                            st.write(f"- {param}: {value:.3f}")
+                                        
+                                        if filter_summary['variance_filtering_applied']:
+                                            st.info("ℹ️ Additional variance filtering applied due to large gene set")
+                                else:
+                                    st.error(f"❌ Filtering failed: {filter_summary.get('error', 'Unknown error')}")
+                                    filtered_data = processed_data
+                            else:
+                                filtered_data = processed_data
+                                st.info("⏭️ Automatic filtering skipped")
+                        
+                        # Step 4: Store processed data
+                        st.session_state.expression_data = filtered_data
+                        
+                        # Final summary
+                        original_shape = raw_data.shape
+                        final_shape = filtered_data.shape
+                        st.success(f"🎉 Data processing complete!")
+                        st.info(f"📈 Final dataset: {final_shape[0]} genes × {final_shape[1]} samples (reduced from {original_shape[0]} genes)")
+                        
+                        # Show preview of processed data
+                        st.subheader("📋 Data Preview")
+                        st.dataframe(filtered_data.head())
                         
                     except Exception as e:
-                        st.error(f"Error loading expression data: {e}")
+                        st.error(f"❌ Error loading expression data: {e}")
+                        st.error("💡 Please check file format: genes as rows, samples as columns, first column should be gene IDs")
             
             with col2:
                 st.subheader("Clinical Data")
