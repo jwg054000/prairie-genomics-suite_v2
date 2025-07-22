@@ -116,7 +116,7 @@ class BasicSurvivalAnalyzer:
     """Built-in survival analysis"""
     
     @staticmethod
-    def kaplan_meier_analysis(clinical_data: pd.DataFrame, time_col: str, event_col: str, group_col: str | None = None):
+    def kaplan_meier_analysis(clinical_data: pd.DataFrame, time_col: str, event_col: str, group_col: Optional[str] = None):
         """Basic Kaplan-Meier survival analysis"""
         try:
             from lifelines import KaplanMeierFitter
