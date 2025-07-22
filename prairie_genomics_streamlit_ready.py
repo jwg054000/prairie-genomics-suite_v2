@@ -116,7 +116,7 @@ class BasicSurvivalAnalyzer:
     """Built-in survival analysis"""
     
     @staticmethod
-    def kaplan_meier_analysis(clinical_data: pd.DataFrame, time_col: str, event_col: str, group_col: str = None):
+    def kaplan_meier_analysis(clinical_data: pd.DataFrame, time_col: str, event_col: str, group_col: str | None = None):
         """Basic Kaplan-Meier survival analysis"""
         try:
             from lifelines import KaplanMeierFitter
@@ -278,7 +278,9 @@ class ImmuneInfiltrationAnalyzer:
                 else:
                     # Z-score normalized mean
                     gene_expr = expression_data.loc[available_genes]
-                    z_scores = (gene_expr - gene_expr.mean(axis=1).values.reshape(-1,1)) / gene_expr.std(axis=1).values.reshape(-1,1)
+                    gene_means = gene_expr.mean(axis='index')
+                    gene_stds = gene_expr.std(axis='index')
+                    z_scores = (gene_expr.sub(gene_means, axis=0)).div(gene_stds, axis=0)
                     scores = z_scores.mean(axis=0)
                 
                 immune_scores[cell_type] = scores
@@ -1349,30 +1351,30 @@ class PrairieGenomicsStreamlit:
                                     (results['baseMean'] > min_expr)
                                 )
                                 
-                                results['Significant'] = significant
-                                results['Regulation'] = results['log2FoldChange'].apply(
-                                    lambda x: 'Up' if x > 0 else 'Down'
-                                )
+                            results['Significant'] = significant
+                            results['Regulation'] = results['log2FoldChange'].apply(
+                                lambda x: 'Up' if x > 0 else 'Down'
+                            )
                                 
-                                # Store results
-                                st.session_state.analysis_results['differential_expression'] = results
+                            # Store results
+                            st.session_state.analysis_results['differential_expression'] = results
+                            
+                            # Display summary
+                            n_total = len(results)
+                            n_significant = significant.sum()
+                            n_up = ((results['log2FoldChange'] > 0) & significant).sum()
+                            n_down = ((results['log2FoldChange'] < 0) & significant).sum()
                                 
-                                # Display summary
-                                n_total = len(results)
-                                n_significant = significant.sum()
-                                n_up = ((results['log2FoldChange'] > 0) & significant).sum()
-                                n_down = ((results['log2FoldChange'] < 0) & significant).sum()
-                                
-                                st.success("✅ Analysis completed!")
-                                
-                                col1, col2, col3, col4 = st.columns(4)
-                                col1.metric("Total Genes", n_total)
-                                col2.metric("Significant", n_significant)
-                                col3.metric("Upregulated", n_up)
-                                col4.metric("Downregulated", n_down)
-                                
-                        except Exception as e:
-                            st.error(f"Analysis failed: {e}")
+                            st.success("✅ Analysis completed!")
+                            
+                            col1, col2, col3, col4 = st.columns(4)
+                            col1.metric("Total Genes", n_total)
+                            col2.metric("Significant", n_significant)
+                            col3.metric("Upregulated", n_up)
+                            col4.metric("Downregulated", n_down)
+                            
+                    except Exception as e:
+                        st.error(f"Analysis failed: {e}")
             
             # Display results
             if 'differential_expression' in st.session_state.analysis_results:
@@ -2380,7 +2382,7 @@ class PrairieGenomicsStreamlit:
     # ================================
     # MAIN APPLICATION RUNNER
     # ================================
-    
+
     def run(self):
         """Run the main application"""
         # Show sidebar
@@ -2408,8 +2410,8 @@ class PrairieGenomicsStreamlit:
         <div style='text-align: center; color: #666; padding: 2rem; background-color: #f8f9fa; border-radius: 10px; margin-top: 2rem;'>
             <h3 style='color: #2c3e50;'>🧬 Prairie Genomics Suite</h3>
             <p style='margin: 0.5rem 0;'><strong>Enhanced Multiomics Edition v3.0</strong></p>
-            <p style='margin: 0.5rem 0;'>🦠 Immune Analysis | 🎯 Gene Binning | 🚀 High Performance</p>
-            <p style='margin: 0.5rem 0; font-size: 0.9em;'>Built with Streamlit • Python • Advanced Analytics • CIBERSORTx • Protein Atlas</p>
+            <p style='margin: 0.5rem 0; font-size: 0.9em;'>🦠 Immune Analysis | 🎯 Gene Binning | 🚀 High Performance</p>
+            <p style='margin: 0.5rem 0; font-size: 0.8em;'>Built with Streamlit • Python • Advanced Analytics • CIBERSORTx • Protein Atlas</p>
             <p style='margin: 0; font-style: italic; color: #7f8c8d;'>Making multiomics analysis accessible to every researcher</p>
             <hr style='margin: 1rem 0; border: none; height: 1px; background-color: #ddd;'>
             <p style='margin: 0; font-size: 0.8em; color: #95a5a6;'>
