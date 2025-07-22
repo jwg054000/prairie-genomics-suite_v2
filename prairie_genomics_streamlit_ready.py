@@ -708,7 +708,10 @@ def get_optional_libraries():
     # Gene conversion
     try:
         import mygene
-        libs['mygene'] = mygene
+        # Create MyGeneInfo client instance
+        mg_client = mygene.MyGeneInfo()
+        libs['mygene'] = mg_client
+        libs['mygene_module'] = mygene  # Store module for reference
     except ImportError:
         pass
     
@@ -1149,27 +1152,69 @@ class PrairieGenomicsStreamlit:
                         
                         if st.button("🔄 Convert Gene IDs"):
                             try:
+                                # Get mygene client
                                 mg = self.libs['mygene']
                                 
-                                # Use detected format as input scope
-                                results = mg.querymany(genes, scopes=detected_format, fields=conversion_type, species='human')
+                                # Validate client has querymany method
+                                if not hasattr(mg, 'querymany'):
+                                    st.error("❌ MyGene client not properly initialized")
+                                    return
+                                
+                                with st.spinner("🔄 Converting gene IDs via MyGene.info..."):
+                                    # Use detected format as input scope  
+                                    result_data = mg.querymany(genes, scopes=detected_format, fields=conversion_type, species='human', returnall=True)
+                                
+                                # Extract results from returnall format
+                                if isinstance(result_data, dict) and 'out' in result_data:
+                                    results = result_data['out']
+                                    missing = result_data.get('missing', [])
+                                else:
+                                    # Fallback for different return format
+                                    results = result_data if isinstance(result_data, list) else []
+                                    missing = []
                                 
                                 conversion_df = pd.DataFrame(results)
                                 
                                 # Calculate conversion statistics
                                 total_genes = len(genes)
-                                successful_conversions = len([r for r in results if conversion_type in r and 'notfound' not in r])
-                                success_rate = (successful_conversions / total_genes) * 100
+                                if conversion_type in conversion_df.columns:
+                                    successful_conversions = conversion_df[conversion_type].notna().sum()
+                                else:
+                                    successful_conversions = len([r for r in results if conversion_type in r and 'notfound' not in r])
+                                success_rate = (successful_conversions / total_genes) * 100 if total_genes > 0 else 0
                                 
                                 st.session_state.analysis_results['gene_conversion'] = conversion_df
-                                st.success(f"Gene conversion completed! {successful_conversions}/{total_genes} genes converted ({success_rate:.1f}% success rate)")
+                                
+                                # Display results
+                                if successful_conversions > 0:
+                                    st.success(f"✅ Gene conversion completed! {successful_conversions}/{total_genes} genes converted ({success_rate:.1f}% success rate)")
+                                    
+                                    if len(missing) > 0:
+                                        st.info(f"ℹ️ {len(missing)} genes could not be found in MyGene database")
+                                        
+                                    # Show example conversions
+                                    if not conversion_df.empty and conversion_type in conversion_df.columns:
+                                        with st.expander("📋 Conversion Examples"):
+                                            valid_conversions = conversion_df[conversion_df[conversion_type].notna()]
+                                            if not valid_conversions.empty:
+                                                st.dataframe(valid_conversions[['query', conversion_type]].head(10))
+                                else:
+                                    st.error("❌ No genes could be converted. Please check your gene format and internet connection.")
                                 
                                 if success_rate < 50:
-                                    st.warning("⚠️ Low conversion rate. Consider checking input gene format or trying different conversion options.")
+                                    st.warning("⚠️ Low conversion rate. This might indicate:")
+                                    st.warning("• Incorrect gene ID format detection")
+                                    st.warning("• Missing genes from MyGene database") 
+                                    st.warning("• Network connectivity issues")
                                 
                             except Exception as e:
-                                st.error(f"Gene conversion failed: {e}")
-                                st.error("💡 Try: pip install mygene, or check your internet connection")
+                                st.error(f"❌ Gene conversion failed: {e}")
+                                st.error("💡 Possible solutions:")
+                                st.error("• Check internet connection")
+                                st.error("• Verify mygene package is installed: `pip install mygene`")
+                                st.error("• Try again - MyGene.info service might be temporarily unavailable")
+                                # Show debug info
+                                st.error(f"🐛 Debug info: {type(e).__name__}: {str(e)}")
                     
                     with col2:
                         if 'gene_conversion' in st.session_state.analysis_results:
